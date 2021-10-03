@@ -1,0 +1,3 @@
+[submodule "inkrss-web"]
+	path = inkrss-web
+	url = github:dearrrfish/inkrss-web
