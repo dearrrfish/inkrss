@@ -1,14 +1,14 @@
-import { html} from "../html";
+import { html } from "../html";
+import Subscriptions from "../subscriptions.class";
+
 export async function botList(ctx) {
-  let subraw = (await KV.get("sub")) || "[]";
-  const sub = JSON.parse(subraw);
-  if (sub.length == 0) {
+  const subs = new Subscriptions('sub');
+  await subs.init();
+  const feeds = subs.feeds;
+  if (!feeds.length) {
     await ctx.reply("还没有进行过订阅");
-  } else {
-    let msg = "";
-    for (let i = 0; i < sub.length; i++) {
-      msg += `[${html(sub[i].title)}](${sub[i].url})\n`;
-    }
-    await ctx.reply(msg, { parse_mode: "HTML" });
+    return;
   }
+  const msg = feeds.map(f => `[${html(f.title)}](${f.url})`).join('\n');
+  await ctx.reply(msg, { parse_mode: "HTML" });
 }

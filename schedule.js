@@ -1,105 +1,73 @@
 import { mode, config } from "./config";
-import { identify } from "./utils/identify";
+import Subscriptions from './utils/subscriptions.class';
 
 const { reply, replyWhenError } = require(`./notifications/${mode}`);
 const {
-  SUB_ERROR_RETRY_INTERVAL_MIN,
-  SUB_FETCH_INTERVAL_MIN,
-  MAX_ERROR_COUNT,
   MAX_SUBS_PER_SCHEDULE,
   MAX_SUB_ITEMS,
-  PARSE_URL,
 } = config
 
 export async function handleScheduled(event) {
-  const subraw = await KV.get("sub");
+  const subs = new Subscriptions('sub');
+  await subs.init();
 
-  const allSubs = JSON.parse(subraw)
+  const updateableFeeds = subs.getUpdateableFeeds({
+    max: MAX_SUBS_PER_SCHEDULE,
+  });
 
-  const now = new Date();
-  const filteredSubs = allSubs
-    // Get all ACTIVE subs, also filter out recently failed subs
-    .filter(s =>
-      s.active === true
-      && (now - new Date(s.lastUpdateTime)) > SUB_FETCH_INTERVAL_MIN * 60 * 1000
-      && (
-        s.errorTimes == 0
-        || (now - new Date(s.lastUpdateTime)) > SUB_ERROR_RETRY_INTERVAL_MIN * 60 * 1000
-      )
-    )
-    // sort picked subs by `lastUpdateTime`
-    .sort((a, b) => a.lastUpdateTime - b.lastUpdateTime)
-    // limit max subs to check in this run
-    .slice(0, MAX_SUBS_PER_SCHEDULE);
+  if (!updateableFeeds.length) {
+    console.log('no updateable feeds found')
+    return;
+  }
 
-  for (const sub of filteredSubs) {
-    sub.lastUpdateTime = now;
-
+  for (const feed of updateableFeeds) {
     try {
-      const resp = await fetch(sub.url);
-      const text = await resp.text();
-      const id = identify(text);
-      console.log(`latest update  id of '${sub.title}': ${id}`);
-      console.log(`kv update id of '${sub.title}': ${sub.id}`);
-      if (id != sub.id) {
-        const res = await fetch(`${PARSE_URL}/api/xml2json`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json; charset=utf-8",
-          },
-          body: JSON.stringify({
-            url: sub.url,
-          }),
-        });
-        const data = await res.json();
-
-        let items = (data.items || []);
-        // Rankings feed, simply reverse the order of items
-        if (sub.rankings) {
-          items.reverse();
-        }
-        else {
-          items = items.sort((a, b) => {
-            // if `pubDate` exists
-            if (a.pubDate && b.pubDate) {
-              return new Date(a.pubDate) - new Date(b.pubDate)
-            }
-
-            return 0;
-          });
-          items = items.slice(Math.max(0, items.length - MAX_SUB_ITEMS));
-        }
-
-        // Filling _id in each item
-        items.forEach(item => {
-          // Preferred `id` field:  `guid` > `link` > `title`, as same logic as in identify()
-          item._id = item.guid || item.link || item.title;
-        });
-
-        items = items.slice(items.findIndex(item => item._id == sub.lastUpdateItem) + 1);
-        for (const item of items) {
-          console.log('sending item ', item);
-          !self.DEBUG_DISABLE_NOTIFY && await reply(sub, item);
-          sub.lastUpdateItem = item._id;
-        }
-        sub.errorTimes = 0;
-        sub.id = id;
-        console.log('updating sub states: ', sub)
-        await KV.put("sub", JSON.stringify(allSubs));
-        break;
+      await feed.fetch();
+      const newUpdateId = feed.identify()
+      if (!newUpdateId) {
+        console.log('no new update id calculated, skip as no-modified content')
+        continue;
       }
-    } catch (err) {
-      console.error(err);
-      sub.errorTimes += 1;
-      if (sub.errorTimes >= MAX_ERROR_COUNT) {
-        console.log("error over max start notify");
-        sub.active = false;
-        await replyWhenError(sub);
-        await KV.put("sub", JSON.stringify(allSubs));
-        break;
+
+      const items = feed.getNewItems();
+      if (!items.length) {
+        console.log('no updateable items, skip')
       } else {
-        await KV.put("sub", JSON.stringify(allSubs));
+        let countProcessed = 0;
+        while (items.length && ++countProcessed <= MAX_SUB_ITEMS) {
+          const item = items.shift();
+          if (DEBUG_DISABLE_NOTIFY == true) {
+            console.log('dry-run item ', item);
+          } else {
+            console.log('sending item ', item);
+            await reply(feed, item);
+            console.log('sent item ', item.id)
+          }
+          feed.lastProcessedItem = item.id;
+        }
       }
+
+      // reset feed error count
+      feed.clearError();
+
+      // finished all items, store new feed's update id
+      if (!items.length) {
+        console.log('feed is up to date, new update id = ', newUpdateId);
+        feed.upToDate(newUpdateId);
+      }
+
+      await subs.save();
+
+    } catch (err) {
+      console.log(err);
+      const stillActive = feed.countError(err);
+      if (!stillActive) {
+        await replyWhenError(feed);
+        await subs.save();
+        break;
+      }
+      await subs.save();
     }
+
   }
 }
