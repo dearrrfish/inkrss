@@ -33,6 +33,7 @@ export async function handleScheduled(event) {
     stats.updated.push(feed.title);
     try {
       await feed.fetch();
+
       const newUpdateId = feed.identify()
       if (!newUpdateId) {
         console.log('no new update id calculated, skip as no-modified content')
@@ -41,30 +42,32 @@ export async function handleScheduled(event) {
 
       const items = feed.getNewItems();
       if (!items.length) {
-        console.log('no updateable items, skip')
-      } else {
-        while (items.length && ++countProcessed <= MAX_SUB_ITEMS) {
-          const item = items.shift();
-          if (DEBUG_DISABLE_NOTIFY == true) {
-            console.log('dry-run item ', item);
-          } else {
-            console.log('sending item ', item);
-            await reply(feed, item);
-            console.log('sent item ', item.id)
-          }
-          feed.lastProcessedItem = item.id;
-          stats.updated_items = countProcessed;
-        }
+        console.log('no updateable items, skip');
+        continue;
       }
 
-      // reset feed error count
-      feed.clearError();
+      while (items.length && ++countProcessed <= MAX_SUB_ITEMS) {
+        const item = items.shift();
+        if (DEBUG_DISABLE_NOTIFY == true) {
+          console.log('dry-run item ', item);
+        } else {
+          console.log('sending item ', item);
+          await reply(feed, item);
+          console.log('sent item ', item.id)
+        }
+        feed.lastProcessedItem = item.id;
+        stats.updated_items = countProcessed;
+      }
 
-      // finished all items, store new feed's update id
       if (!items.length) {
         console.log('feed is up to date, new update id = ', newUpdateId);
         feed.upToDate(newUpdateId);
       }
+
+      // reset feed error count after successful processed
+      feed.clearError();
+
+      // finished all items, store new feed's update id
 
       // all above succeed here, let's quit the loop
       // - one processed feed per run due to KV write limit as 1,000
@@ -93,5 +96,6 @@ export async function handleScheduled(event) {
   console.log('schedule run stats: ', stats);
 
   // save kv state at the end
+  // always save here since `feed.lastUpdateTime` needs to be updated
   await subs.save();
 }

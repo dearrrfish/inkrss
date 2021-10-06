@@ -15,7 +15,7 @@ kv_namespaces = [
 ]
 
 [triggers]
-crons = ["*/1 * * * *"]
+crons = ["*/5 * * * *"]
 
 [site]
 bucket = "./public"
@@ -26,8 +26,6 @@ entry-point = "./"
 [vars]
 # <required> Notification mode, e.g. bark, telegram or wechat
 NOTIFIER = ""
-# <required> External function to parse XML feed
-PARSE_URL = ""
 # <optional> Secret path to management UI (default: "subs")
 SECRET_PATH = ""
 # # <optional> Minimal wait time until next try on error sub in minutes (defaults: 5)
@@ -69,7 +67,6 @@ WECHAT_URL = ""
 # [env.production.vars]
 # NOTIFIER = "telegram" # bark, telegram or wechat
 
-# PARSE_URL = ""
 # SECRET_PATH = ""
 
 # # Telegram notification
