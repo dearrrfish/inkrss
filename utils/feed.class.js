@@ -5,14 +5,16 @@ import {
   parseRssXml,
 } from './xml-feed-parser'
 
-const FEED_FORMATS = ['xml', 'json'];
-const FEED_TYPES = ['UPDATES', 'RANKINGS', 'EVENTS'];
-const FEED_UPDATE_ID_TYPE = [
+const FEED_TYPES = {};
+['UPDATES', 'RANKINGS', 'EVENTS'].forEach(t => { FEED_TYPES[t] = t; });
+
+const FEED_UPDATE_ID_TYPE = {};
+[
   'CONDITIONAL_GET',
   'LAST_BUILD_TAG',
   'FIRST_ITEM',
   'FIRST_ITEM_TITLE'
-];
+].forEach(t => { FEED_UPDATE_ID_TYPE[t] = t; });
 
 
 export default class Feed {
@@ -34,7 +36,7 @@ export default class Feed {
   // set format(val) { this._type = FEED_FORMATS.indexOf(val) != -1 ? 'xml' : val; }
 
   get type() { return this._type; }
-  set type(val) { this._type = FEED_TYPES.indexOf(val) != -1 ? 'UPDATES' : val; }
+  set type(val) { this._type = FEED_TYPES[val] || FEED_TYPES.UPDATES; }
 
   get tags() { return this._tags || []; }
   set tags(val) { this._tags = val; }
@@ -46,8 +48,25 @@ export default class Feed {
 
   get lastUpdateTime() { return this._lastUpdateTime; }
 
-  get lastProcessedItem() { return this._lastProcessedItem; }
-  set lastProcessedItem(val) { this._lastProcessedItem = val; }
+  get lastProcessedItem() {
+    if (this._type == FEED_TYPES.RANKINGS) {
+      if (!(this._lastProcessedItem || '').startsWith('[')) {
+        this._lastProcessedItem = '[]';
+      }
+      return JSON.parse(this._lastProcessedItem);
+    } else {
+      return this._lastProcessedItem;
+    }
+  }
+  set lastProcessedItem(val) {
+    if (this._type == FEED_TYPES.RANKINGS) {
+      const processed = this.lastProcessedItem;
+      processed.push(val);
+      this._lastProcessedItem = JSON.stringify(processed);
+    } else {
+      this._lastProcessedItem = val;
+    }
+  }
 
 
   activate() { this._active = true; }
@@ -115,12 +134,12 @@ export default class Feed {
     // HEADERS['If-None-Match']
     if (this._etag) {
       headers['If-None-Match'] = this._etag;
-      this._updateIdType = 'CONDITIONAL_GET'
+      this._updateIdType = FEED_UPDATE_ID_TYPE.CONDITIONAL_GET;
     }
     // HEADERS['If-Modified-Since']
     else if (this._lastModified) {
       headers['If-Modified-Since'] = this._lastModified;
-      this._updateIdType = 'CONDITIONAL_GET'
+      this._updateIdType = FEED_UPDATE_ID_TYPE.CONDITIONAL_GET;
     }
 
     this.log(null, 'fetching with headers: ', headers);
@@ -150,7 +169,7 @@ export default class Feed {
     this._resp_lastModified = this._resp.headers.get('Last-Modified');
     this._resp_etag = this._resp.headers.get('ETag');
     if (this._resp_lastModified || this._resp_etag) {
-      this._updateIdType = 'CONDITIONAL_GET';
+      this._updateIdType = FEED_UPDATE_ID_TYPE.CONDITIONAL_GET;
       // TODO: check if we need to confirm If-Modified-Since & If-None-Match here
     }
 
@@ -189,7 +208,7 @@ export default class Feed {
 
     let newId;
 
-    if (this._updateIdType == 'CONDITIONAL_GET') {
+    if (this._updateIdType == FEED_UPDATE_ID_TYPE.CONDITIONAL_GET) {
       newId = `${this._resp_lastModified || ''}|${this._resp_etag || ''}`;
     }
 
@@ -224,9 +243,37 @@ export default class Feed {
       : null
   }
 
-  getNewItems() {
+  detectNewItemsMethodType() {
+    const items = this._json.items || this._json.entries;
+    const allDateStrings = items.map(i => {
+      const pubDate = i.date_published || i.date_modified // json feed
+        || i.published || i.updated // atom feed
+        || i.pubDate  // rss feed
+        ;
+      return pubDate;
+    }
+    );
+
+    if (new Set(allDateStrings).size <= 1) {
+      return FEED_TYPES.RANKINGS;
+    }
+
+    const allDates = allDateStrings.map(s => new Date(s));
+
+    if (
+      !allDates.every((v, i, a) => !i || a[i - 1] <= v)
+      && !allDates.every((v, i, a) => !i || a[i - 1] >= v)
+    ) {
+      return FEED_TYPES.RANKINGS;
+    }
+
+    return FEED_TYPES.UPDATES  // default
+  }
+
+  filterNewItemsByDate() {
+    let _items = [];
     if (this.isJson()) {
-      let _items = this._json.items.sort((a, b) => {
+      _items = this._json.items.sort((a, b) => {
         if (a.date_published && b.date_published) {
           return new Date(a.date_published) - new Date(b.date_published);
         }
@@ -240,19 +287,9 @@ export default class Feed {
         _items = _items.slice(_items.findIndex(item => item.id == this._lastProcessedItem) + 1)
       }
 
-      // ref: https://www.jsonfeed.org/version/1/
-      return _items.map(i => ({
-        id: i.id,
-        title: i.title || i.summary,
-        link: i.url,
-        content: i.content_html || i.content_text,
-        pubDate: i.date_published || i.date_modified,
-        tags: i.tags,
-      }));
-
     }
     else if (this.isAtom()) {
-      let _items = this._json.entries.sort((a, b) => {
+      _items = this._json.entries.sort((a, b) => {
         if (a.updated && b.updated) {
           return new Date(a.updated) - new Date(b.updated);
         }
@@ -263,18 +300,10 @@ export default class Feed {
         _items = _items.slice(_items.findIndex(item => item.id == this._lastProcessedItem) + 1)
       }
 
-      // ref: https://validator.w3.org/feed/docs/atom.html
-      return _items.map(i => ({
-        id: i.id,
-        title: i.title,
-        link: i.link,
-        content: i.content || i.summary,
-        pubDate: i.published || i.updated,
-      }))
 
     }
     else if (this.isRss()) {
-      let _items = this._json.items.sort((a, b) => {
+      _items = this._json.items.sort((a, b) => {
         if (a.pubDate && b.pubDate) {
           return new Date(a.pubDate) - new Date(b.pubDate);
         }
@@ -284,19 +313,80 @@ export default class Feed {
       if (this._lastProcessedItem) {
         _items = _items.slice(_items.findIndex(item => item.guid == this._lastProcessedItem) + 1)
       }
+    }
 
+    return _items;
+  }
+
+  filterNewItemsByIDs() {
+    const newItems = [];
+    const processedItems = [];
+    const lastProcessedItems = this.lastProcessedItem;
+    const items = this._json.items || this._json.entries;
+    items.forEach(item => {
+      const id = item.id || item.guid;
+      if (lastProcessedItems.indexOf(id) != -1) {
+        processedItems.push(id);
+      } else {
+        newItems.push(item);
+      }
+    });
+
+    this._lastProcessedItem = JSON.stringify(processedItems);
+
+    return newItems.reverse();
+  }
+
+  constructItems(items) {
+    if (this.isJson()) {
+      // ref: https://www.jsonfeed.org/version/1/
+      return items.map(i => ({
+        id: i.id,
+        title: i.title || i.summary,
+        link: i.url,
+        content: i.content_html || i.content_text,
+        pubDate: i.date_published || i.date_modified,
+        tags: i.tags,
+      }));
+
+    } else if (this.isAtom()) {
       // ref: https://validator.w3.org/feed/docs/atom.html
-      return _items.map(i => ({
+      return items.map(i => ({
+        id: i.id,
+        title: i.title,
+        link: i.link,
+        content: i.content || i.summary,
+        pubDate: i.published || i.updated,
+      }))
+    } else if (this.isRss()) {
+      // ref: https://validator.w3.org/feed/docs/atom.html
+      return items.map(i => ({
         id: i.guid,
         title: i.title,
         link: i.link,
         content: i.description,
         pubDate: i.pubDate,
       }))
-
     }
 
-    return [];
+    return items;
+
+  }
+
+  getNewItems() {
+    if (!this._type) {
+      this._type = this.detectNewItemsMethodType();
+      this.log(null, `set feed type to ${this._type}`);
+    }
+
+    switch (this._type) {
+      case FEED_TYPES.UPDATES:
+        return this.constructItems(this.filterNewItemsByDate());
+      case FEED_TYPES.RANKINGS:
+        return this.constructItems(this.filterNewItemsByIDs());
+      default:
+        return [];
+    }
   }
 
   upToDate(newId) {

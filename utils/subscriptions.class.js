@@ -56,13 +56,11 @@ export default class Subscriptions {
   async subscribe(url) {
     const feed = new Feed({ url, new: true });
     await feed.fetch();
-    feed.clearError();
-    feed.activate();
-
     if (this.hasFeed(feed)) {
       throw new Error('Already subscribed')
     }
-
+    feed.clearError();
+    feed.activate();
     this._feeds.push(feed);
     await this.save();
     return feed;
